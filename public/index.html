@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Headline to Market</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 640px; margin: 0 auto; padding: 16px; }
+  textarea { width: 100%; padding: 8px; font: inherit; }
+  button { padding: 8px 14px; font: inherit; margin-top: 8px; }
+  .card { border: 1px solid #ccc; border-radius: 8px; padding: 12px; margin-top: 12px; }
+  .err { color: #b3261e; } .ok { color: #1b6e3a; } .muted { color: #666; }
+</style>
+</head>
+<body>
+<h1>Headline to Market</h1>
+<p class="muted">Paste a headline. You'll get a market you can settle, or a reason it can't be one. Nothing goes live until you approve it.</p>
+<textarea id="h" rows="3" placeholder="e.g. RBI to announce rate decision on 5 December"></textarea>
+<button id="go">Draft market</button>
+<div id="out"></div>
+<h2>Markets</h2>
+<div id="list"></div>
+<script>
+const out = document.getElementById("out"), list = document.getElementById("list");
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function refresh() {
+  const rows = await (await fetch("/api/markets")).json();
+  list.innerHTML = rows.map((r) => `<div class="card"><b>${esc(r.question)}</b>
+    <div class="muted">${esc(r.status)} · closes ${esc(r.close_time)}</div></div>`).join("") || '<p class="muted">None yet.</p>';
+}
+
+document.getElementById("go").onclick = async () => {
+  out.innerHTML = '<p class="muted">Drafting…</p>';
+  try {
+    const r = await (await fetch("/api/generate", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ headline: document.getElementById("h").value }),
+    })).json();
+    if (r.status === "draft") {
+      const m = r.market;
+      out.innerHTML = `<div class="card"><b>${esc(m.question)}</b>
+        <p>Closes: ${esc(m.closeTime)}</p><p>Decided by: ${esc(m.resolutionSource)}</p><p>Edge cases: ${esc(m.edgeCaseRule)}</p>
+        <button id="ap">Approve and publish</button></div>`;
+      document.getElementById("ap").onclick = async () => {
+        await fetch(`/api/markets/${r.id}/approve`, { method: "POST" });
+        out.innerHTML = '<p class="ok">Published.</p>'; refresh();
+      };
+    } else if (r.status === "unresolvable") {
+      out.innerHTML = `<div class="card"><b>This headline can't become a fair market.</b><p>${esc(r.reason)}</p></div>`;
+    } else {
+      out.innerHTML = `<div class="card"><p class="err">${esc(r.reason)}</p>${r.canRetry ? "<p>Click “Draft market” to retry, or draft this one manually.</p>" : ""}</div>`;
+    }
+  } catch { out.innerHTML = '<p class="err">Network error. Try again.</p>'; }
+};
+refresh();
+</script>
+</body>
+</html>
