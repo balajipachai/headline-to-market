@@ -5,52 +5,77 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Headline to Market</title>
 <style>
-  body { font: 16px/1.5 system-ui, sans-serif; max-width: 640px; margin: 0 auto; padding: 16px; }
-  textarea { width: 100%; padding: 8px; font: inherit; }
-  button { padding: 8px 14px; font: inherit; margin-top: 8px; }
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 680px; margin: 0 auto; padding: 16px; }
+  textarea, input { width: 100%; padding: 8px; font: inherit; box-sizing: border-box; margin-bottom: 8px; }
+  label { display: block; font-weight: 600; margin-top: 8px; }
+  button { padding: 8px 14px; font: inherit; margin: 8px 8px 0 0; }
   .card { border: 1px solid #ccc; border-radius: 8px; padding: 12px; margin-top: 12px; }
-  .err { color: #b3261e; } .ok { color: #1b6e3a; } .muted { color: #666; }
+  .err { color: #b3261e; } .ok { color: #1b6e3a; } .muted { color: #666; } .warn { color: #8a5a00; }
+  .why { background: #f4f1e8; padding: 8px; border-radius: 6px; }
 </style>
 </head>
 <body>
 <h1>Headline to Market</h1>
-<p class="muted">Paste a headline. You'll get a market you can settle, or a reason it can't be one. Nothing goes live until you approve it.</p>
-<textarea id="h" rows="3" placeholder="e.g. RBI to announce rate decision on 5 December"></textarea>
+<p class="muted">Paste a headline. You'll get a market you can settle, or a reason it can't be one. Edit anything you like. Nothing goes live until you approve it.</p>
+<label for="h">Headline</label>
+<textarea id="h" rows="2" placeholder="e.g. RBI to announce rate decision on 5 December"></textarea>
+<label for="s">Article snippet (optional)</label>
+<textarea id="s" rows="3"></textarea>
 <button id="go">Draft market</button>
 <div id="out"></div>
 <h2>Markets</h2>
 <div id="list"></div>
 <script>
 const out = document.getElementById("out"), list = document.getElementById("list");
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const post = (url, body, method = "POST") => fetch(url, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
 
 async function refresh() {
   const rows = await (await fetch("/api/markets")).json();
   list.innerHTML = rows.map((r) => `<div class="card"><b>${esc(r.question)}</b>
-    <div class="muted">${esc(r.status)} · closes ${esc(r.close_time)}</div></div>`).join("") || '<p class="muted">None yet.</p>';
+    <div class="muted">${esc(r.status)} · closes ${esc(r.close_time)} · source: ${esc(r.resolution_source)}</div></div>`).join("") || '<p class="muted">None yet.</p>';
+}
+
+function showDraft(r) {
+  const m = r.market;
+  const field = (id, label, value, tag = "textarea") =>
+    `<label for="${id}">${label}</label><${tag} id="${id}" ${tag === "textarea" ? 'rows="2"' : `value="${esc(value)}"`}>${tag === "textarea" ? esc(value) : ""}${tag === "textarea" ? "</textarea>" : ""}`;
+  out.innerHTML = `<div class="card">
+    <div class="why"><b>Why the tool chose this</b><br>${esc(m.rationale)}</div>
+    ${r.warnings.map((w) => `<p class="warn">${esc(w)}</p>`).join("")}
+    ${field("q", "Question", m.question)}
+    ${field("ct", "Closes (ISO date and time)", m.closeTime, "input")}
+    ${field("src", "Decided by", m.resolutionSource, "input")}
+    ${field("yes", "What counts as YES", m.yesCriteria)}
+    ${field("edge", "Edge cases", m.edgeCaseRule)}
+    <div id="msg"></div>
+    <button id="save">Save edits</button><button id="ap">Approve and publish</button><button id="dc">Discard</button></div>`;
+  const body = () => ({
+    question: q.value, closeTime: ct.value, resolutionSource: src.value, yesCriteria: yes.value, edgeCaseRule: edge.value,
+  });
+  const say = (data, okText) => {
+    const problems = data.problems || [];
+    msg.innerHTML = problems.length ? problems.map((p) => `<p class="err">${esc(p)}</p>`).join("") : `<p class="ok">${okText}</p>`;
+  };
+  save.onclick = async () => { const res = await post(`/api/markets/${r.id}`, body(), "PATCH"); say(await res.json(), "Saved."); refresh(); };
+  ap.onclick = async () => {
+    const saved = await post(`/api/markets/${r.id}`, body(), "PATCH");
+    if (!saved.ok) return say(await saved.json(), "");
+    const res = await post(`/api/markets/${r.id}/approve`);
+    const data = await res.json();
+    if (res.ok) { out.innerHTML = '<p class="ok">Published.</p>'; refresh(); } else say(data, "");
+  };
+  dc.onclick = async () => { await post(`/api/markets/${r.id}/discard`); out.innerHTML = '<p class="muted">Draft discarded.</p>'; refresh(); };
 }
 
 document.getElementById("go").onclick = async () => {
   out.innerHTML = '<p class="muted">Drafting…</p>';
   try {
-    const r = await (await fetch("/api/generate", {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ headline: document.getElementById("h").value }),
-    })).json();
-    if (r.status === "draft") {
-      const m = r.market;
-      out.innerHTML = `<div class="card"><b>${esc(m.question)}</b>
-        <p>Closes: ${esc(m.closeTime)}</p><p>Decided by: ${esc(m.resolutionSource)}</p><p>Edge cases: ${esc(m.edgeCaseRule)}</p>
-        <button id="ap">Approve and publish</button></div>`;
-      document.getElementById("ap").onclick = async () => {
-        await fetch(`/api/markets/${r.id}/approve`, { method: "POST" });
-        out.innerHTML = '<p class="ok">Published.</p>'; refresh();
-      };
-    } else if (r.status === "unresolvable") {
-      out.innerHTML = `<div class="card"><b>This headline can't become a fair market.</b><p>${esc(r.reason)}</p></div>`;
-    } else {
-      out.innerHTML = `<div class="card"><p class="err">${esc(r.reason)}</p>${r.canRetry ? "<p>Click “Draft market” to retry, or draft this one manually.</p>" : ""}</div>`;
-    }
+    const r = await (await post("/api/generate", { headline: h.value, snippet: s.value })).json();
+    if (r.status === "draft") showDraft(r);
+    else if (r.status === "unresolvable")
+      out.innerHTML = `<div class="card"><b>This headline can't become a fair market.</b><p>${esc(r.reason)}</p>${r.suggestion ? `<p><b>Try instead:</b> ${esc(r.suggestion)}</p>` : ""}</div>`;
+    else out.innerHTML = `<div class="card"><p class="err">${esc(r.reason)}</p>${r.canRetry ? "<p>Click “Draft market” to retry, or draft this one manually.</p>" : ""}</div>`;
   } catch { out.innerHTML = '<p class="err">Network error. Try again.</p>'; }
 };
 refresh();
