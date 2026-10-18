@@ -1,14 +1,15 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { modelOutput, toolInputSchema, type MarketDraft } from "./schema.js";
 import { systemPrompt, userMessage } from "./prompt.js";
+import { validateDraft } from "./validate.js";
 
 export const MODEL = process.env.MODEL ?? "claude-sonnet-5-5";
 export const TIMEOUT_MS = 20_000;
 export const MAX_RETRIES = 2;
 
 export type GenerateResult =
-  | { status: "draft"; market: MarketDraft }
-  | { status: "unresolvable"; reason: string }
+  | { status: "draft"; market: MarketDraft; warnings: string[] }
+  | { status: "unresolvable"; reason: string; suggestion?: string }
   | { status: "failed"; reason: string; canRetry: boolean };
 
 // Narrow shape of the client we use, so tests can pass a fake.
@@ -24,15 +25,16 @@ export async function generateMarket(
   headline: string,
   client: ModelClient,
   now: Date = new Date(),
+  snippet?: string,
 ): Promise<GenerateResult> {
   let response;
   try {
     response = await client.messages.create(
       {
         model: MODEL,
-        max_tokens: 1024,
+        max_tokens: 1500,
         system: systemPrompt(now),
-        messages: [{ role: "user", content: userMessage(headline) }],
+        messages: [{ role: "user", content: userMessage(headline, snippet) }],
         tools: [
           {
             name: "submit_market",
@@ -44,7 +46,7 @@ export async function generateMarket(
       },
       { timeout: TIMEOUT_MS, maxRetries: MAX_RETRIES },
     );
-  } catch (err) {
+  } catch {
     return { status: "failed", reason: "The model could not be reached. Try again.", canRetry: true };
   }
 
@@ -59,15 +61,12 @@ export async function generateMarket(
   }
 
   const out = parsed.data;
-  if (out.outcome === "unresolvable") return { status: "unresolvable", reason: out.reason };
+  if (out.outcome === "unresolvable") return { status: "unresolvable", reason: out.reason, suggestion: out.suggestion };
 
-  // Enforced in code, not only in the prompt.
-  if (Date.parse(out.closeTime) <= now.getTime()) {
-    return {
-      status: "failed",
-      reason: "The suggested close time is not in the future. Retry, or draft this one manually.",
-      canRetry: true,
-    };
+  // Meaning checks run in code, not only in the prompt.
+  const { problems, warnings } = validateDraft(out, now);
+  if (problems.length) {
+    return { status: "failed", reason: `${problems.join(" ")} Retry, or draft this one manually.`, canRetry: true };
   }
-  return { status: "draft", market: out };
+  return { status: "draft", market: out, warnings };
 }
